@@ -1,5 +1,8 @@
 import asyncio
 import os
+import smtplib
+from email.mime.text import MIMEText
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -9,6 +12,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID"))
+GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -55,21 +60,59 @@ def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-async def send_notification(text_lines: str, user: types.User):
+def send_email(subject: str, body: str) -> None:
+    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
+        print("Email не настроен: GMAIL_ADDRESS или GMAIL_APP_PASSWORD отсутствуют")
+        return
+
+    try:
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = GMAIL_ADDRESS
+        msg["To"] = GMAIL_ADDRESS
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_ADDRESS, GMAIL_ADDRESS, msg.as_string())
+
+        print("Email отправлен успешно")
+    except Exception as e:
+        print(f"Ошибка отправки email: {e}")
+
+
+async def send_notification(text_lines: str, user: types.User, subject: str) -> None:
     prefix = text_lines + "🔗 Telegram: "
+
     if user.username:
         mention_str = f"@{user.username}"
         full_text = prefix + mention_str
-        entity = types.MessageEntity(type="mention", offset=utf16_len(prefix), length=utf16_len(mention_str))
+        entity = types.MessageEntity(
+            type="mention",
+            offset=utf16_len(prefix),
+            length=utf16_len(mention_str),
+        )
     else:
         mention_str = user.full_name or str(user.id)
         full_text = prefix + mention_str
-        entity = types.MessageEntity(type="text_mention", offset=utf16_len(prefix), length=utf16_len(mention_str), user=user)
+        entity = types.MessageEntity(
+            type="text_mention",
+            offset=utf16_len(prefix),
+            length=utf16_len(mention_str),
+            user=user,
+        )
+
     try:
         await bot.send_message(chat_id=OWNER_ID, text=full_text, entities=[entity])
     except Exception as e:
-        print(f"Ошибка отправки: {e}")
-        await bot.send_message(chat_id=OWNER_ID, text=full_text)
+        print(f"Ошибка Telegram: {e}")
+        try:
+            await bot.send_message(chat_id=OWNER_ID, text=full_text)
+        except Exception as e2:
+            print(f"Ошибка fallback Telegram: {e2}")
+
+    email_body = full_text.replace("🔗 Telegram: ", "Telegram: ")
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, send_email, subject, email_body)
 
 
 @dp.message(CommandStart())
@@ -98,7 +141,10 @@ async def free_handler(callback: types.CallbackQuery, state: FSMContext):
 async def name_handler(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text)
     await state.set_state(OrderForm.waiting_for_goal)
-    await message.answer("Напишите, пожалуйста, для каких целей ищете специалиста?\n(для онлайн-школы, для курса в мессенджере, для частных созвонов/вебинаров и т.д.)")
+    await message.answer(
+        "Напишите, пожалуйста, для каких целей ищете специалиста?\n"
+        "(для онлайн-школы, для курса в мессенджере, для частных созвонов/вебинаров и т.д.)"
+    )
 
 
 @dp.message(OrderForm.waiting_for_goal)
@@ -112,10 +158,16 @@ async def goal_handler(message: types.Message, state: FSMContext):
 async def contact_handler(message: types.Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
-    text_lines = (f"📬 Новая заявка!\n\n🎯 Услуга: {data.get('service', '—')}\n"
-                  f"👤 Имя / должность: {data.get('name', '—')}\n"
-                  f"📋 Цель: {data.get('goal', '—')}\n📩 Контакт: {message.text}\n")
-    await send_notification(text_lines, message.from_user)
+
+    text_lines = (
+        f"📬 Новая заявка!\n\n"
+        f"🎯 Услуга: {data.get('service', '—')}\n"
+        f"👤 Имя / должность: {data.get('name', '—')}\n"
+        f"📋 Цель: {data.get('goal', '—')}\n"
+        f"📩 Контакт: {message.text}\n"
+    )
+
+    await send_notification(text_lines, message.from_user, subject="📬 Новая заявка от клиента")
     await message.answer("Спасибо, ваш запрос получен, я обязательно отвечу вам в ближайшее время.")
 
 
@@ -130,8 +182,14 @@ async def free_message_handler(message: types.Message, state: FSMContext):
 async def free_contact_handler(message: types.Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
-    text_lines = (f"💬 Сообщение в ЛС!\n\n📝 Текст: {data.get('free_message', '—')}\n📩 Контакт: {message.text}\n")
-    await send_notification(text_lines, message.from_user)
+
+    text_lines = (
+        f"💬 Сообщение в ЛС!\n\n"
+        f"📝 Текст: {data.get('free_message', '—')}\n"
+        f"📩 Контакт: {message.text}\n"
+    )
+
+    await send_notification(text_lines, message.from_user, subject="💬 Новое сообщение от клиента")
     await message.answer("Спасибо, ваш запрос получен, я обязательно отвечу вам в ближайшее время.")
 
 
